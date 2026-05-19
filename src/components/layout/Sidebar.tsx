@@ -1,12 +1,14 @@
 "use client";
-import React from "react";
+import React, { useMemo } from "react";
 import { useSidebar } from "@/hooks/useSidebar";
+import { useAuth } from "@/context/AuthContext";
+import { PermissionsService } from "@/services/permissions";
 import { SidebarLink } from "./SidebarLink";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, LayoutDashboard, Users, Package, ShoppingCart, BarChart2, Settings } from "lucide-react";
 import type { NavItem } from "@/types";
 
-const NAV_ITEMS: NavItem[] = [
+const ALL_NAV_ITEMS: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Users",     href: "/users",     icon: Users            },
   { label: "Products",  href: "/products",  icon: Package          },
@@ -17,6 +19,25 @@ const NAV_ITEMS: NavItem[] = [
 
 export function Sidebar() {
   const { collapsed, toggle } = useSidebar();
+  const { user } = useAuth();
+
+  // Filter menu items based on user role
+  const visibleItems = useMemo(() => {
+    // Super Admin, Admin, Dev: show all items
+    if (PermissionsService.isAdmin(user)) {
+      return ALL_NAV_ITEMS;
+    }
+
+    // Custom users: show only Orders and Products
+    if (PermissionsService.isCustomOnly(user)) {
+      return ALL_NAV_ITEMS.filter(item =>
+        item.href === "/orders" || item.href === "/products"
+      );
+    }
+
+    // Default: show all (fallback)
+    return ALL_NAV_ITEMS;
+  }, [user]);
 
   return (
     <aside className={`${collapsed ? "w-16" : "w-64"} bg-white border-r border-slate-200 flex flex-col transition-all duration-300 hidden md:flex`}>
@@ -25,7 +46,7 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 overflow-y-auto p-4 space-y-2">
-        {NAV_ITEMS.map(item => (
+        {visibleItems.map(item => (
           <SidebarLink key={item.href} item={item} collapsed={collapsed} />
         ))}
       </nav>
