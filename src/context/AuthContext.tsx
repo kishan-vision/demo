@@ -21,15 +21,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Setup SSO listener
     AuthService.setupSSO();
 
-    // Check for existing session (from page refresh)
-    if (AuthService.isAuthenticated()) {
-      setUser(AuthService.getUser());
+    // Check for existing valid session (e.g., from page refresh)
+    const existingUser = AuthService.getUser();
+    if (existingUser && existingUser.exp * 1000 > Date.now()) {
+      setUser(existingUser);
     }
 
     // Set timeout for waiting for token
+    const timeoutDuration = 5000;
+
     const timeout = setTimeout(() => {
       setIsLoading(false);
-    }, 5000);
+    }, timeoutDuration);
 
     // Listen for auth events
     const handleSSO = (event: CustomEvent<DecodedToken>) => {
@@ -39,17 +42,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     const handleAuthError = (event: CustomEvent) => {
-      console.error("Auth error:", event.detail);
+      console.error("[Auth] SSO error:", event.detail);
+      setIsLoading(false);
+      clearTimeout(timeout);
+    };
+
+    const handleLogout = () => {
+      setUser(null);
       setIsLoading(false);
       clearTimeout(timeout);
     };
 
     window.addEventListener("sso-authenticated", handleSSO as EventListener);
     window.addEventListener("sso-auth-error", handleAuthError as EventListener);
+    window.addEventListener("sso-logout", handleLogout as EventListener);
 
     return () => {
       window.removeEventListener("sso-authenticated", handleSSO as EventListener);
       window.removeEventListener("sso-auth-error", handleAuthError as EventListener);
+      window.removeEventListener("sso-logout", handleLogout as EventListener);
       clearTimeout(timeout);
     };
   }, []);
@@ -79,4 +90,9 @@ export function useAuth() {
     throw new Error("useAuth must be used within AuthProvider");
   }
   return context;
+}
+
+// Expose AuthService to window for development/testing
+if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
+  (window as any).AuthService = AuthService;
 }

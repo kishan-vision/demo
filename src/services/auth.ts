@@ -3,19 +3,31 @@ import type { DecodedToken, SSOMessage } from "@/types/auth";
 
 export class AuthService {
   private static JWT_SECRET = process.env.NEXT_PUBLIC_JWT_SECRET || "";
-  private static MAIN_APP_ORIGIN = process.env.NEXT_PUBLIC_MAIN_APP_ORIGIN || "https://acentecom.com";
+  private static MAIN_APP_ORIGIN = process.env.NEXT_PUBLIC_MAIN_APP_ORIGIN || "";
   private static listenerAdded = false;
-
   /**
    * Setup postMessage listener for SSO token from parent frame (idempotent)
    */
   static setupSSO() {
+    if (typeof window === "undefined") return;
     if (this.listenerAdded) return;
 
-    window.addEventListener("message", (event) => {
-      this.handleSSO(event);
-    });
+    // Check for token in URL
+    this.checkTokenFromUrl();
 
+    const messageHandler = (event: MessageEvent) => {
+      // Handle SSO token
+      if (event.data?.type === "SSO_TOKEN") {
+        this.handleSSO(event);
+      }
+      // Handle logout from parent
+      else if (event.data?.type === "LOGOUT") {
+        this.logout();
+        window.dispatchEvent(new CustomEvent("sso-logout"));
+      }
+    };
+
+    window.addEventListener("message", messageHandler);
     this.listenerAdded = true;
   }
 
@@ -23,47 +35,32 @@ export class AuthService {
    * Handle incoming SSO token from main app
    */
   private static async handleSSO(event: MessageEvent<SSOMessage>) {
-    // 1. CRITICAL: Verify origin
-    if (event.origin !== this.MAIN_APP_ORIGIN) {
-      console.warn(`[SSO] Rejected message from untrusted origin: ${event.origin}`);
+    // 1. Verify message type first
+    if (!event.data || event.data?.type !== "SSO_TOKEN") {
       return;
     }
 
-    // 2. Verify message type
-    if (event.data?.type !== "SSO_TOKEN") {
+    // 2. Verify origin
+    if (event.origin !== this.MAIN_APP_ORIGIN) {
+      console.warn(`[SSO] Rejected message from untrusted origin: ${event.origin}, expected: ${this.MAIN_APP_ORIGIN}`);
       return;
     }
 
     const token = event.data.token;
 
-    // 3. Decode and validate JWT
     try {
       const decoded = await this.validateAndDecodeToken(token);
 
-      // 4. Check token expiry
       if (decoded.exp * 1000 < Date.now()) {
         console.error("[SSO] Token has expired");
-        this.requestTokenRefresh();
         return;
       }
 
-      // 5. Store session
       this.storeSession(decoded);
-
-      // 6. Dispatch auth event (for app to react to auth change)
-      window.dispatchEvent(
-        new CustomEvent("sso-authenticated", { detail: decoded })
-      );
-
-      console.log("[SSO] Authentication successful", {
-        email: decoded.email,
-        user_type: decoded.user_type,
-      });
+      window.dispatchEvent(new CustomEvent("sso-authenticated", { detail: decoded }));
     } catch (error) {
       console.error("[SSO] Token validation failed:", error);
-      window.dispatchEvent(
-        new CustomEvent("sso-auth-error", { detail: error })
-      );
+      window.dispatchEvent(new CustomEvent("sso-auth-error", { detail: error }));
     }
   }
 
@@ -72,13 +69,28 @@ export class AuthService {
    */
   private static async validateAndDecodeToken(token: string): Promise<DecodedToken> {
     try {
+      if (!this.JWT_SECRET) {
+        throw new Error("JWT_SECRET is not configured");
+      }
+
       const secret = new TextEncoder().encode(this.JWT_SECRET);
       const { payload } = await jwtVerify(token, secret, {
         algorithms: ["HS256"],
       });
-      return payload as unknown as DecodedToken;
+
+      const decoded = payload as unknown as DecodedToken;
+      const requiredFields = ["sub", "email", "name", "roles", "user_type", "brand_ids", "custom_role_types", "iat", "exp"];
+      const missingFields = requiredFields.filter(field => !(field in decoded));
+
+      if (missingFields.length > 0) {
+        throw new Error(`Token missing required fields: ${missingFields.join(", ")}`);
+      }
+
+      return decoded;
     } catch (error) {
-      throw new Error("Invalid JWT: " + (error instanceof Error ? error.message : String(error)));
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error("[SSO] JWT validation error:", errorMsg);
+      throw new Error("Invalid JWT: " + errorMsg);
     }
   }
 
@@ -86,6 +98,7 @@ export class AuthService {
    * Store decoded token in sessionStorage
    */
   private static storeSession(decoded: DecodedToken) {
+    sessionStorage.removeItem("sso_user");
     sessionStorage.setItem("sso_user", JSON.stringify(decoded));
   }
 
@@ -114,23 +127,11 @@ export class AuthService {
     const user = this.getUser();
     if (!user) return false;
 
-    // Verify not expired
     if (user.exp * 1000 < Date.now()) {
-      this.requestTokenRefresh();
       return false;
     }
 
     return true;
-  }
-
-  /**
-   * Request fresh token from parent frame
-   */
-  private static requestTokenRefresh() {
-    window.parent.postMessage(
-      { type: "REQUEST_TOKEN_REFRESH" },
-      this.MAIN_APP_ORIGIN
-    );
   }
 
   /**
@@ -139,4 +140,24 @@ export class AuthService {
   static logout() {
     sessionStorage.removeItem("sso_user");
   }
+
+  /**
+   * Check for token in URL query parameters
+   */
+  private static checkTokenFromUrl() {
+    if (typeof window === "undefined") return;
+
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("sso_token");
+
+    if (token) {
+      const event = new MessageEvent("message", {
+        data: { type: "SSO_TOKEN", token },
+        origin: this.MAIN_APP_ORIGIN,
+      });
+      this.handleSSO(event as any);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }
+
 }
